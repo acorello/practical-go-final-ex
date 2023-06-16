@@ -25,23 +25,23 @@ A worker is a client provided function which is given a sequence number of `data
 
 If retry the data is submitted again with the same sequence number.
 */
-type Worker[T any] func(n SequenceNumber, data T) WorkerReport
+type Worker[T any] func(n JobNumber, data T) WorkerReport
 
-type SequenceNumber = uint
+type JobNumber = uint
 
 type jobReport struct {
-	SequenceNumber
+	JobNumber
 	WorkerReport
 }
 
 type job[T any] struct {
-	SequenceNumber
+	JobNumber
 	data T
 }
 
 type nod struct{}
 
-type jobMap[T any] map[SequenceNumber]job[T]
+type jobMap[T any] map[JobNumber]job[T]
 
 type set[T comparable] map[T]nod
 
@@ -55,22 +55,22 @@ type set[T comparable] map[T]nod
 type jobsTracker[T any] struct {
 	ds DataSource[T]
 	// incremented each time we call ds.Next()
-	counter SequenceNumber
+	counter JobNumber
 	// contains all jobs returned by Next() but not yet Done()
 	inProgress jobMap[T]
 	// the subset of `inProgress` jobs marked as Retry()
-	retrySet set[SequenceNumber]
+	retrySet set[JobNumber]
 }
 
 // The sequence number of the WIP job we want to retry.
 //
 // Panics if job not in WIP.
-func (jobs *jobsTracker[T]) Retry(n SequenceNumber) {
+func (jobs *jobsTracker[T]) Retry(n JobNumber) {
 	jobs.requireJobInProgress(n)
 	jobs.retrySet[n] = nod{}
 }
 
-func (jobs *jobsTracker[T]) Done(n SequenceNumber) {
+func (jobs *jobsTracker[T]) Done(n JobNumber) {
 	jobs.requireJobInProgress(n)
 	delete(jobs.inProgress, n)
 	delete(jobs.retrySet, n)
@@ -97,14 +97,14 @@ func (jobs *jobsTracker[T]) Next() (j job[T]) {
 		j = jobs.inProgress[n]
 	} else if jobs.ds.HasNext() {
 		jobs.counter += 1
-		j.SequenceNumber = jobs.counter
+		j.JobNumber = jobs.counter
 		j.data = jobs.ds.Next()
-		jobs.inProgress[j.SequenceNumber] = j
+		jobs.inProgress[j.JobNumber] = j
 	}
 	return j
 }
 
-func (jobs *jobsTracker[T]) requireJobInProgress(n SequenceNumber) {
+func (jobs *jobsTracker[T]) requireJobInProgress(n JobNumber) {
 	if _, found := jobs.inProgress[n]; !found {
 		log.Panicf("Job Number %d not found in WIP: %v", n, maps.Keys(jobs.inProgress))
 	}
@@ -114,7 +114,7 @@ func newJobsTracker[T any](workersPoolSize uint8, dataSource DataSource[T]) jobs
 	return jobsTracker[T]{
 		ds: dataSource,
 
-		retrySet:   make(set[SequenceNumber]),
+		retrySet:   make(set[JobNumber]),
 		inProgress: make(jobMap[T], workersPoolSize),
 	}
 }
@@ -132,11 +132,11 @@ func Process[T any](worker Worker[T], workersPoolSize uint8, dataSource DataSour
 	reportsChannel := make(chan jobReport)
 	startWorker := func(workerId uint8) {
 		for job := range workersChannel {
-			log.Printf("Worker %d on job %d", workerId, job.SequenceNumber)
-			workerReport := worker(job.SequenceNumber, job.data)
+			log.Printf("Worker %d on job %d", workerId, job.JobNumber)
+			workerReport := worker(job.JobNumber, job.data)
 			reportsChannel <- jobReport{
-				SequenceNumber: job.SequenceNumber,
-				WorkerReport:   workerReport,
+				JobNumber:    job.JobNumber,
+				WorkerReport: workerReport,
 			}
 		}
 	}
@@ -159,9 +159,9 @@ feedingLoop:
 			case AbortBatch:
 				break feedingLoop
 			case MoveOn:
-				jobsTracker.Done(report.SequenceNumber)
+				jobsTracker.Done(report.JobNumber)
 			case Retry:
-				jobsTracker.Retry(report.SequenceNumber)
+				jobsTracker.Retry(report.JobNumber)
 				if jobsTracker.HasNext() && workersChannel == nil {
 					workersChannel = workersChannelCopy
 				}
@@ -173,7 +173,7 @@ feedingLoop:
 	jobsTracker.Clear()
 }
 
-func pop(m set[SequenceNumber]) (SequenceNumber, bool) {
+func pop(m set[JobNumber]) (JobNumber, bool) {
 	for n := range m {
 		delete(m, n)
 		return n, true

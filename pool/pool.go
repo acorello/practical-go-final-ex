@@ -45,35 +45,30 @@ type jobMap[T any] map[SequenceNumber]job[T]
 
 type set[T comparable] map[T]nod
 
+// given a DataSource
+// assigns a sequence number to each new piece of data
+// keeps track of the data being returned until it's flagged as Done()
+// if flagged as Retry() it returns the data again before consuming more
 type jobsTracker[T any] struct {
 	ds DataSource[T]
-
-	// counter exclusively incremented each time we get new data from ds
+	// incremented each time we call ds.Next()
 	counter SequenceNumber
-	// the number of the last job we returned: maybe from ds.Next() or from the retrySet
-	lastJob SequenceNumber
-
+	// contains all jobs returned by Next() but not yet Done()
 	inProgress jobMap[T]
 	// retrySet is always a subset of wip
 	retrySet set[SequenceNumber]
-}
-
-func (jobs *jobsTracker[T]) panicIfJobNotInProgress(n SequenceNumber) {
-	if _, found := jobs.inProgress[n]; !found {
-		log.Panicf("Job Number %d not found in WIP: %v", n, maps.Keys(jobs.inProgress))
-	}
 }
 
 // The sequence number of the WIP job we want to retry.
 //
 // Panics if job not in WIP.
 func (jobs *jobsTracker[T]) Retry(n SequenceNumber) {
-	jobs.panicIfJobNotInProgress(n)
+	jobs.requireJobInProgress(n)
 	jobs.retrySet[n] = nod{}
 }
 
 func (jobs *jobsTracker[T]) Done(n SequenceNumber) {
-	jobs.panicIfJobNotInProgress(n)
+	jobs.requireJobInProgress(n)
 	delete(jobs.inProgress, n)
 	delete(jobs.retrySet, n)
 }
@@ -103,9 +98,13 @@ func (jobs *jobsTracker[T]) Next() (j job[T]) {
 		j.data = jobs.ds.Next()
 		jobs.inProgress[j.SequenceNumber] = j
 	}
-	// if we got neither we're using the zero value
-	jobs.lastJob = j.SequenceNumber
 	return j
+}
+
+func (jobs *jobsTracker[T]) requireJobInProgress(n SequenceNumber) {
+	if _, found := jobs.inProgress[n]; !found {
+		log.Panicf("Job Number %d not found in WIP: %v", n, maps.Keys(jobs.inProgress))
+	}
 }
 
 func newJobsTracker[T any](workersPoolSize uint8, dataSource DataSource[T]) jobsTracker[T] {
@@ -117,30 +116,36 @@ func newJobsTracker[T any](workersPoolSize uint8, dataSource DataSource[T]) jobs
 	}
 }
 
-// Size is 0 than it's automatically decided.
+// if workersPoolSize is 0 than it's automatically decided.
 func Process[T any](worker Worker[T], workersPoolSize uint8, dataSource DataSource[T]) {
+	if workersPoolSize == 0 {
+		workersPoolSize = 4
+	}
+
 	jobsTracker := newJobsTracker[T](workersPoolSize, dataSource)
 
 	workersChannel := make(chan job[T])
 	workersChannelCopy := workersChannel
 	reportsChannel := make(chan jobReport)
+	startWorker := func(workerId uint8) {
+		for job := range workersChannel {
+			log.Printf("Worker %d on job %d", workerId, job.SequenceNumber)
+			workerReport := worker(job.SequenceNumber, job.data)
+			reportsChannel <- jobReport{
+				SequenceNumber: job.SequenceNumber,
+				WorkerReport:   workerReport,
+			}
+		}
+	}
 
 	for wI := workersPoolSize; wI > 0; wI-- {
-		go func(workerId uint8) {
-			for job := range workersChannel {
-				log.Printf("Worker %d on %d", workerId, job.SequenceNumber)
-				reportsChannel <- jobReport{
-					SequenceNumber: job.SequenceNumber,
-					WorkerReport:   worker(job.SequenceNumber, job.data),
-				}
-			}
-		}(wI)
+		go startWorker(wI)
 	}
 
 feedingLoop:
 	for jobsTracker.HasNext() || jobsTracker.HasWIP() {
 		select {
-		// what if I'm calling something provided by the client that puts this co-routine to sleep within the Next() method and not because the workersChannel is saturated?
+		// ❓ what if I'm calling something provided by the client that puts this co-routine to sleep within the Next() method and not because the workersChannel is saturated?
 		case workersChannel <- jobsTracker.Next():
 			if !jobsTracker.HasNext() {
 				// disable this ‹case›, otherwise we'll feed zero(job)

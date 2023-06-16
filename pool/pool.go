@@ -58,53 +58,53 @@ type jobsTracker[T any] struct {
 	retrySet set[SequenceNumber]
 }
 
-func (s *jobsTracker[T]) panicIfJobNotInProgress(n SequenceNumber) {
-	if _, found := s.inProgress[n]; !found {
-		log.Panicf("Job Number %d not found in WIP: %v", n, maps.Keys(s.inProgress))
+func (jobs *jobsTracker[T]) panicIfJobNotInProgress(n SequenceNumber) {
+	if _, found := jobs.inProgress[n]; !found {
+		log.Panicf("Job Number %d not found in WIP: %v", n, maps.Keys(jobs.inProgress))
 	}
 }
 
 // The sequence number of the WIP job we want to retry.
 //
 // Panics if job not in WIP.
-func (s *jobsTracker[T]) Retry(n SequenceNumber) {
-	s.panicIfJobNotInProgress(n)
-	s.retrySet[n] = nod{}
+func (jobs *jobsTracker[T]) Retry(n SequenceNumber) {
+	jobs.panicIfJobNotInProgress(n)
+	jobs.retrySet[n] = nod{}
 }
 
-func (s *jobsTracker[T]) Done(n SequenceNumber) {
-	s.panicIfJobNotInProgress(n)
-	delete(s.inProgress, n)
-	delete(s.retrySet, n)
+func (jobs *jobsTracker[T]) Done(n SequenceNumber) {
+	jobs.panicIfJobNotInProgress(n)
+	delete(jobs.inProgress, n)
+	delete(jobs.retrySet, n)
 }
 
-func (s *jobsTracker[T]) Clear() {
-	maps.Clear(s.retrySet)
-	maps.Clear(s.inProgress)
+func (jobs *jobsTracker[T]) Clear() {
+	maps.Clear(jobs.retrySet)
+	maps.Clear(jobs.inProgress)
 }
 
-func (s *jobsTracker[T]) HasNext() bool {
-	return len(s.retrySet) > 0 || s.ds.HasNext()
+func (jobs *jobsTracker[T]) HasNext() bool {
+	return len(jobs.retrySet) > 0 || jobs.ds.HasNext()
 }
 
-func (s *jobsTracker[T]) HasWIP() bool {
-	return len(s.inProgress) > 0
+func (jobs *jobsTracker[T]) HasWIP() bool {
+	return len(jobs.inProgress) > 0
 }
 
 // Return a job from the Retry Queue or the next job from the underlying data-source.
 // Returned job is stored in the WIP collection.
 // Returned job-sequence is accessible on jobsTracker.lastJob
-func (s *jobsTracker[T]) Next() (j job[T]) {
-	if n, found := pop(s.retrySet); found {
-		j = s.inProgress[n]
-	} else if s.ds.HasNext() {
-		s.counter += 1
-		j.SequenceNumber = s.counter
-		j.data = s.ds.Next()
-		s.inProgress[j.SequenceNumber] = j
+func (jobs *jobsTracker[T]) Next() (j job[T]) {
+	if n, found := pop(jobs.retrySet); found {
+		j = jobs.inProgress[n]
+	} else if jobs.ds.HasNext() {
+		jobs.counter += 1
+		j.SequenceNumber = jobs.counter
+		j.data = jobs.ds.Next()
+		jobs.inProgress[j.SequenceNumber] = j
 	}
 	// if we got neither we're using the zero value
-	s.lastJob = j.SequenceNumber
+	jobs.lastJob = j.SequenceNumber
 	return j
 }
 

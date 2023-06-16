@@ -29,7 +29,7 @@ type Worker[T any] func(n SequenceNumber, data T) WorkerReport
 
 type SequenceNumber = uint
 
-type report struct {
+type jobReport struct {
 	SequenceNumber
 	WorkerReport
 }
@@ -48,75 +48,88 @@ type set[T comparable] map[T]nod
 type jobsTracker[T any] struct {
 	ds DataSource[T]
 
-	lastJob    SequenceNumber
-	retryQueue set[SequenceNumber]
-	wip        jobMap[T]
+	// counter exclusively incremented each time we get new data from ds
+	counter SequenceNumber
+	// the number of the last job we returned: maybe from ds.Next() or from the retrySet
+	lastJob SequenceNumber
+
+	inProgress jobMap[T]
+	// retrySet is always a subset of wip
+	retrySet set[SequenceNumber]
 }
 
+func (s *jobsTracker[T]) panicIfJobNotInProgress(n SequenceNumber) {
+	if _, found := s.inProgress[n]; !found {
+		log.Panicf("Job Number %d not found in WIP: %v", n, maps.Keys(s.inProgress))
+	}
+}
+
+// The sequence number of the WIP job we want to retry.
+//
+// Panics if job not in WIP.
 func (s *jobsTracker[T]) Retry(n SequenceNumber) {
-	s.retryQueue[n] = nod{}
+	s.panicIfJobNotInProgress(n)
+	s.retrySet[n] = nod{}
 }
 
 func (s *jobsTracker[T]) Done(n SequenceNumber) {
-	delete(s.retryQueue, n)
-	delete(s.wip, n)
+	s.panicIfJobNotInProgress(n)
+	delete(s.inProgress, n)
+	delete(s.retrySet, n)
 }
 
 func (s *jobsTracker[T]) Clear() {
-	maps.Clear(s.retryQueue)
-	maps.Clear(s.wip)
+	maps.Clear(s.retrySet)
+	maps.Clear(s.inProgress)
 }
 
 func (s *jobsTracker[T]) HasNext() bool {
-	return len(s.retryQueue) > 0 || s.ds.HasNext()
+	return len(s.retrySet) > 0 || s.ds.HasNext()
 }
 
 func (s *jobsTracker[T]) HasWIP() bool {
-	return len(s.wip) > 0
+	return len(s.inProgress) > 0
 }
 
 // Return a job from the Retry Queue or the next job from the underlying data-source.
 // Returned job is stored in the WIP collection.
 // Returned job-sequence is accessible on jobsTracker.lastJob
-func (s *jobsTracker[T]) Next() job[T] {
-	var j job[T]
-	if n, found := pop(s.retryQueue); found {
-		s.lastJob = n
-		j = s.wip[n]
+func (s *jobsTracker[T]) Next() (j job[T]) {
+	if n, found := pop(s.retrySet); found {
+		j = s.inProgress[n]
 	} else if s.ds.HasNext() {
-		s.lastJob += 1
-		j.SequenceNumber = s.lastJob
+		s.counter += 1
+		j.SequenceNumber = s.counter
 		j.data = s.ds.Next()
-		s.wip[s.lastJob] = j
+		s.inProgress[j.SequenceNumber] = j
 	}
+	// if we got neither we're using the zero value
+	s.lastJob = j.SequenceNumber
 	return j
 }
 
 func newJobsTracker[T any](workersPoolSize uint8, dataSource DataSource[T]) jobsTracker[T] {
 	return jobsTracker[T]{
-		ds:         dataSource,
-		retryQueue: make(set[SequenceNumber]),
-		wip:        make(jobMap[T], workersPoolSize),
+		ds: dataSource,
+
+		retrySet:   make(set[SequenceNumber]),
+		inProgress: make(jobMap[T], workersPoolSize),
 	}
 }
 
 // Size is 0 than it's automatically decided.
 func Process[T any](worker Worker[T], workersPoolSize uint8, dataSource DataSource[T]) {
-	if !dataSource.HasNext() {
-		log.Printf("Data Source is empty")
-		return
-	}
 	jobsTracker := newJobsTracker[T](workersPoolSize, dataSource)
 
 	workersChannel := make(chan job[T])
 	workersChannelCopy := workersChannel
-	reportsChannel := make(chan report)
+	reportsChannel := make(chan jobReport)
 
 	for wI := workersPoolSize; wI > 0; wI-- {
 		go func(workerId uint8) {
 			for job := range workersChannel {
 				log.Printf("Worker %d on %d", workerId, job.SequenceNumber)
-				reportsChannel <- report{
+				reportsChannel <- jobReport{
 					SequenceNumber: job.SequenceNumber,
 					WorkerReport:   worker(job.SequenceNumber, job.data),
 				}

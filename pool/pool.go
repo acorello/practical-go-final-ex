@@ -49,13 +49,16 @@ type set[T comparable] map[T]nod
 // assigns a sequence number to each new piece of data
 // keeps track of the data being returned until it's flagged as Done()
 // if flagged as Retry() it returns the data again before consuming more
+//
+// It's up to he Worker to decide if an how many times to retry a job.
+// The worker can also decide  to abort the whole computation.
 type jobsTracker[T any] struct {
 	ds DataSource[T]
 	// incremented each time we call ds.Next()
 	counter SequenceNumber
 	// contains all jobs returned by Next() but not yet Done()
 	inProgress jobMap[T]
-	// retrySet is always a subset of wip
+	// the subset of `inProgress` jobs marked as Retry()
 	retrySet set[SequenceNumber]
 }
 
@@ -74,8 +77,8 @@ func (jobs *jobsTracker[T]) Done(n SequenceNumber) {
 }
 
 func (jobs *jobsTracker[T]) Clear() {
-	maps.Clear(jobs.retrySet)
 	maps.Clear(jobs.inProgress)
+	maps.Clear(jobs.retrySet)
 }
 
 func (jobs *jobsTracker[T]) HasNext() bool {
